@@ -69,3 +69,14 @@ func (r *UserRepo) TopByElo(limit int) ([]model.User, error) {
 	err := database.DB.Order("elo_rating DESC").Limit(limit).Find(&users).Error
 	return users, err
 }
+
+func (r *UserRepo) GetAvgRank(userID uint) (float64, error) {
+	var result struct {
+		AvgRank float64
+	}
+	err := database.DB.Table("game_players").
+		Select("AVG(final_rank) as avg_rank").
+		Where("user_id = ? AND is_ai = false", userID).
+		Scan(&result).Error
+	return result.AvgRank, err
+}

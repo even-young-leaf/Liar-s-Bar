@@ -159,3 +159,51 @@ func (s *UserService) OnlineCount() int64 {
 func userOnlineKey(userID uint) string {
 	return fmt.Sprintf("user:online:%d", userID)
 }
+
+type UserStats struct {
+	TotalGames                int     `json:"total_games"`
+	TotalWins                 int     `json:"total_wins"`
+	TotalLosses               int     `json:"total_losses"`
+	WinRate                   float64 `json:"win_rate"`
+	EloRating                 int     `json:"elo_rating"`
+	TotalLies                 int     `json:"total_lies"`
+	TotalChallenges           int     `json:"total_challenges"`
+	TotalSuccessfulChallenges int     `json:"total_successful_challenges"`
+	ChallengeSuccessRate      float64 `json:"challenge_success_rate"`
+	AvgRank                   float64 `json:"avg_rank"`
+}
+
+func (s *UserService) GetUserStats(userID uint) (*UserStats, error) {
+	user, err := s.repo.FindByID(userID)
+	if err != nil {
+		return nil, err
+	}
+
+	stats := &UserStats{
+		TotalGames:                user.TotalGames,
+		TotalWins:                 user.TotalWins,
+		TotalLosses:               user.TotalLosses,
+		EloRating:                 user.EloRating,
+		TotalLies:                 user.TotalLies,
+		TotalChallenges:           user.TotalChallenges,
+		TotalSuccessfulChallenges: user.TotalSuccessfulChallenges,
+	}
+
+	// Calculate win rate
+	if stats.TotalGames > 0 {
+		stats.WinRate = float64(stats.TotalWins) / float64(stats.TotalGames)
+	}
+
+	// Calculate challenge success rate
+	if stats.TotalChallenges > 0 {
+		stats.ChallengeSuccessRate = float64(stats.TotalSuccessfulChallenges) / float64(stats.TotalChallenges)
+	}
+
+	// Calculate average rank from game_players table
+	avgRank, err := s.repo.GetAvgRank(userID)
+	if err == nil {
+		stats.AvgRank = avgRank
+	}
+
+	return stats, nil
+}

@@ -43,6 +43,8 @@ func main() {
 	roomService := service.NewRoomService()
 	userSvc := service.NewUserService(cfg)
 	roomCtrl := controller.NewRoomController(roomService, hub)
+	gameService := service.NewGameService()
+	gameCtrl := controller.NewGameController(gameService)
 
 	// Wire game-over stat recording (invoked exactly once per finished game)
 	hub.OnGameOver = func(roomID, winnerID uint, players []*game.Player) {
@@ -55,8 +57,12 @@ func main() {
 	matchService := match.NewMatchService(hub, &cfg.Game, roomService)
 	matchCtrl := controller.NewMatchController(hub, matchService)
 
-	lobbyCtrl := controller.NewLobbyController(hub)
+	// Set dependencies for user controller
+	userCtrl.SetDependencies(hub, matchService)
+
+	lobbyCtrl := controller.NewLobbyController(hub, matchService)
 	adminCtrl := controller.NewAdminController(hub)
+	characterCtrl := controller.NewCharacterController()
 
 	// Setup Gin router
 	r := gin.Default()
@@ -102,6 +108,9 @@ func main() {
 		auth.POST("/login", authCtrl.Login)
 	}
 
+	// Character routes (public)
+	api.GET("/characters", characterCtrl.GetCharacters)
+
 	// Protected routes
 	protected := api.Group("", middleware.AuthMiddleware(&cfg.JWT))
 
@@ -110,6 +119,8 @@ func main() {
 	{
 		user.GET("/profile", userCtrl.GetProfile)
 		user.PUT("/profile", userCtrl.UpdateProfile)
+		user.GET("/status", userCtrl.GetStatus)
+		user.GET("/stats", userCtrl.GetStats)
 	}
 
 	// Match routes
@@ -134,9 +145,8 @@ func main() {
 	protected.GET("/lobby", lobbyCtrl.GetLobby)
 
 	// History routes
-	protected.GET("/history", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"code": 0, "data": []interface{}{}})
-	})
+	protected.GET("/history", gameCtrl.GetHistory)
+	protected.GET("/games/:id", gameCtrl.GetGameDetail)
 
 	// Admin routes
 	admin := api.Group("/admin")

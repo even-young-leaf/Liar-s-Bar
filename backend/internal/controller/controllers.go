@@ -72,11 +72,20 @@ func (c *AuthController) Login(ctx *gin.Context) {
 }
 
 type UserController struct {
-	userService *service.UserService
+	userService  *service.UserService
+	hub          *websocket.Hub
+	matchService interface {
+		GetQueueStatus(userID uint) string
+	}
 }
 
 func NewUserController(cfg *config.Config) *UserController {
 	return &UserController{userService: service.NewUserService(cfg)}
+}
+
+func (c *UserController) SetDependencies(hub *websocket.Hub, matchService interface{ GetQueueStatus(userID uint) string }) {
+	c.hub = hub
+	c.matchService = matchService
 }
 
 func (c *UserController) GetProfile(ctx *gin.Context) {
@@ -107,6 +116,70 @@ func (c *UserController) UpdateProfile(ctx *gin.Context) {
 		return
 	}
 	ctx.JSON(http.StatusOK, gin.H{"code": 0, "msg": "success"})
+}
+
+func (c *UserController) GetStatus(ctx *gin.Context) {
+	userID := ctx.GetUint("userID")
+
+	status := "ONLINE"
+	var roomID uint = 0
+	canReconnect := false
+
+	// Check if in match queue
+	if c.matchService != nil {
+		queueStatus := c.matchService.GetQueueStatus(userID)
+		if queueStatus == "WAITING" {
+			status = "IN_QUEUE"
+			ctx.JSON(http.StatusOK, gin.H{
+				"code": 0,
+				"data": gin.H{
+					"status":        status,
+					"room_id":       0,
+					"can_reconnect": false,
+				},
+			})
+			return
+		}
+	}
+
+	// Check if in a room
+	if c.hub != nil {
+		if client := c.hub.GetClient(userID); client != nil && client.RoomID > 0 {
+			roomID = client.RoomID
+			room := c.hub.GetRoom(roomID)
+			if room != nil {
+				status = "IN_GAME"
+				canReconnect = true
+			}
+		}
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"status":        status,
+			"room_id":       roomID,
+			"can_reconnect": canReconnect,
+		},
+	})
+}
+
+func (c *UserController) GetStats(ctx *gin.Context) {
+	userID := ctx.GetUint("userID")
+
+	stats, err := c.userService.GetUserStats(userID)
+	if err != nil {
+		ctx.JSON(http.StatusNotFound, gin.H{
+			"code": 404,
+			"msg":  "user not found",
+		})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": stats,
+	})
 }
 
 type RoomController struct {

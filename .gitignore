@@ -36,3 +36,11 @@ db-export/
 
 # Logs
 *.log
+
+# Claude Code / AI assistant files
+.claude/
+.workbuddy/
+.backup/
+
+# Test files
+backend/test_*.go

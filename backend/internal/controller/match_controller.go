@@ -52,19 +52,28 @@ func (c *MatchController) MatchStatus(ctx *gin.Context) {
 }
 
 type LobbyController struct {
-	hub *websocket.Hub
+	hub          *websocket.Hub
+	matchService *match.MatchService
 }
 
-func NewLobbyController(hub *websocket.Hub) *LobbyController {
-	return &LobbyController{hub: hub}
+func NewLobbyController(hub *websocket.Hub, matchService *match.MatchService) *LobbyController {
+	return &LobbyController{
+		hub:          hub,
+		matchService: matchService,
+	}
 }
 
 func (c *LobbyController) GetLobby(ctx *gin.Context) {
+	queueLength := 0
+	if c.matchService != nil {
+		queueLength = c.matchService.QueueLength()
+	}
+
 	ctx.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
 			"online_count": c.hub.OnlineCount(),
-			"queue_length": 0,
+			"queue_length": queueLength,
 			"active_rooms": c.hub.ActiveRooms(),
 		},
 	})

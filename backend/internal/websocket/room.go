@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -265,17 +266,11 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 			}
 		}
 
-		// If no human players remain, destroy immediately.
-		hasHuman := false
-		for _, p := range r.Players {
-			if !p.IsAI {
-				hasHuman = true
-				break
-			}
-		}
-		if !hasHuman {
+		// Destroy room after delay to let remaining players see the result
+		go func() {
+			time.Sleep(5 * time.Second)
 			r.Hub.DestroyRoom(r.ID)
-		}
+		}()
 		return
 	}
 
@@ -452,6 +447,13 @@ func (r *GameRoom) finalizeGameIfOver() bool {
 			r.Hub.OnGameOver(r.ID, *r.State.WinnerID, r.State.Players)
 		}
 	}
+
+	// Auto-destroy room after game over (delay 5 seconds for clients to see results)
+	go func() {
+		time.Sleep(5 * time.Second)
+		r.Hub.DestroyRoom(r.ID)
+	}()
+
 	return true
 }
 
@@ -709,35 +711,333 @@ func (r *GameRoom) simpleAITurn(player *game.Player, actions []string) {
 		}
 	}
 
-	if hasChallenge && r.State.LastPlay != nil && r.shouldChallenge(player) {
+	ai := newAIStrategy(player, r.State)
+
+	if hasChallenge && r.State.LastPlay != nil && ai.shouldChallenge() {
 		r.executeChallenge(player.ID, r.State.LastPlay.PlayerID)
 	} else if hasPlay {
-		r.executeAIPlay(player)
+		if ai.shouldSkipTurn() {
+			r.executePass(player.ID)
+		} else {
+			r.executeAIPlaySmart(player, ai)
+		}
 	} else {
 		r.executePass(player.ID)
 	}
 }
 
-func (r *GameRoom) shouldChallenge(player *game.Player) bool {
-	if r.State.LastPlay == nil {
-		return false
-	}
+// AI Strategy types
+type AIStrategyType int
 
-	// Count how many of the target card the player has
-	targetCount := 0
-	for _, c := range player.Hand {
-		if c == r.State.TargetCard {
-			targetCount++
+const (
+	AIStrategyConservative AIStrategyType = iota // 保守型：少说谎，多质疑
+	AIStrategyAggressive                         // 激进型：多说谎，少质疑
+	AIStrategyBalanced                           // 平衡型：适度说谎和质疑
+	AIStrategyRandom                             // 随机型：不可预测
+)
+
+type aiStrategy struct {
+	player       *game.Player
+	state        *game.GameState
+	strategyType AIStrategyType
+}
+
+func newAIStrategy(player *game.Player, state *game.GameState) *aiStrategy {
+	// 随机选择策略类型
+	strategyType := AIStrategyType(rand.Intn(4))
+	return &aiStrategy{
+		player:       player,
+		state:        state,
+		strategyType: strategyType,
+	}
+}
+
+// 分析手牌情况
+func (ai *aiStrategy) analyzeHand() (targetCards []int, wildCards []int, otherCards []int) {
+	targetCards = []int{}
+	wildCards = []int{}
+	otherCards = []int{}
+
+	for i, card := range ai.player.Hand {
+		if card == ai.state.TargetCard {
+			targetCards = append(targetCards, i)
+		} else if card == game.Wild {
+			wildCards = append(wildCards, i)
+		} else {
+			otherCards = append(otherCards, i)
+		}
+	}
+	return
+}
+
+// 计算说谎风险
+func (ai *aiStrategy) calculateLyingRisk(targetCards, wildCards []int) float64 {
+	truthfulCards := len(targetCards) + len(wildCards)
+
+	// 基础风险：手里真牌越少，风险越高
+	baseRisk := 1.0 - float64(truthfulCards)/float64(len(ai.player.Hand))
+
+	// 考虑其他玩家的质疑倾向
+	alivePlayers := 0
+	for _, p := range ai.state.Players {
+		if p.IsAlive && p.ID != ai.player.ID {
+			alivePlayers++
 		}
 	}
 
-	// If the last player claimed many cards and you have some of that kind,
-	// it's more likely they're lying
-	if len(r.State.LastPlay.CardIDs) >= 2 && targetCount >= 2 {
-		return true
+	// 玩家越少，被质疑概率越高
+	riskMultiplier := 1.0 + float64(4-alivePlayers)*0.2
+
+	return baseRisk * riskMultiplier
+}
+
+// 决定是否跳过
+func (ai *aiStrategy) shouldSkipTurn() bool {
+	targetCards, wildCards, _ := ai.analyzeHand()
+	truthfulCards := len(targetCards) + len(wildCards)
+
+	switch ai.strategyType {
+	case AIStrategyConservative:
+		// 保守型：手里没真牌时30%概率跳过
+		if truthfulCards == 0 && rand.Float64() < 0.3 {
+			return true
+		}
+	case AIStrategyAggressive:
+		// 激进型：几乎不跳过
+		return false
+	case AIStrategyBalanced:
+		// 平衡型：手里没真牌且手牌少时15%跳过
+		if truthfulCards == 0 && len(ai.player.Hand) <= 2 && rand.Float64() < 0.15 {
+			return true
+		}
+	case AIStrategyRandom:
+		// 随机型：10%概率随机跳过
+		if rand.Float64() < 0.1 {
+			return true
+		}
 	}
 
 	return false
+}
+
+// 决定打几张牌
+func (ai *aiStrategy) decidePlayCount() int {
+	handSize := len(ai.player.Hand)
+
+	switch ai.strategyType {
+	case AIStrategyConservative:
+		// 保守型：少打点，降低风险
+		if handSize <= 2 {
+			return 1
+		}
+		if handSize <= 4 {
+			return rand.Intn(2) + 1 // 1-2张
+		}
+		return rand.Intn(2) + 1 // 1-2张
+
+	case AIStrategyAggressive:
+		// 激进型：多打点，快速出牌
+		if handSize <= 2 {
+			return handSize
+		}
+		if handSize <= 4 {
+			return rand.Intn(2) + 2 // 2-3张
+		}
+		return rand.Intn(2) + 2 // 2-3张
+
+	case AIStrategyBalanced:
+		// 平衡型：根据手牌数量适度调整
+		if handSize <= 2 {
+			return 1
+		}
+		if handSize <= 4 {
+			return rand.Intn(2) + 1 // 1-2张
+		}
+		return rand.Intn(3) + 1 // 1-3张
+
+	case AIStrategyRandom:
+		// 随机型：完全随机
+		maxPlay := 3
+		if handSize < maxPlay {
+			maxPlay = handSize
+		}
+		return rand.Intn(maxPlay) + 1
+	}
+
+	return 1
+}
+
+// 选择要打的牌
+func (ai *aiStrategy) selectCards(playCount int) []int {
+	targetCards, wildCards, otherCards := ai.analyzeHand()
+	indices := []int{}
+
+	switch ai.strategyType {
+	case AIStrategyConservative:
+		// 保守型：优先打真牌+WILD，尽量不说谎
+		for len(indices) < playCount && len(targetCards) > 0 {
+			indices = append(indices, targetCards[0])
+			targetCards = targetCards[1:]
+		}
+		for len(indices) < playCount && len(wildCards) > 0 {
+			indices = append(indices, wildCards[0])
+			wildCards = wildCards[1:]
+		}
+		// 如果必须说谎，只在手牌多时才说
+		if len(indices) < playCount && len(ai.player.Hand) >= 4 {
+			for len(indices) < playCount && len(otherCards) > 0 {
+				indices = append(indices, otherCards[0])
+				otherCards = otherCards[1:]
+			}
+		}
+
+	case AIStrategyAggressive:
+		// 激进型：混合打牌，经常说谎
+		// 50%概率混入假牌
+		usedSlots := 0
+		for usedSlots < playCount {
+			if rand.Float64() < 0.5 && len(targetCards) > 0 {
+				indices = append(indices, targetCards[0])
+				targetCards = targetCards[1:]
+			} else if len(otherCards) > 0 {
+				indices = append(indices, otherCards[0])
+				otherCards = otherCards[1:]
+			} else if len(targetCards) > 0 {
+				indices = append(indices, targetCards[0])
+				targetCards = targetCards[1:]
+			} else if len(wildCards) > 0 {
+				indices = append(indices, wildCards[0])
+				wildCards = wildCards[1:]
+			}
+			usedSlots++
+		}
+
+	case AIStrategyBalanced:
+		// 平衡型：优先真牌，必要时说谎
+		for len(indices) < playCount && len(targetCards) > 0 {
+			indices = append(indices, targetCards[0])
+			targetCards = targetCards[1:]
+		}
+		for len(indices) < playCount && len(wildCards) > 0 {
+			indices = append(indices, wildCards[0])
+			wildCards = wildCards[1:]
+		}
+		for len(indices) < playCount && len(otherCards) > 0 {
+			indices = append(indices, otherCards[0])
+			otherCards = otherCards[1:]
+		}
+
+	case AIStrategyRandom:
+		// 随机型：完全随机选牌
+		allIndices := []int{}
+		for i := range ai.player.Hand {
+			allIndices = append(allIndices, i)
+		}
+		rand.Shuffle(len(allIndices), func(i, j int) {
+			allIndices[i], allIndices[j] = allIndices[j], allIndices[i]
+		})
+		for i := 0; i < playCount && i < len(allIndices); i++ {
+			indices = append(indices, allIndices[i])
+		}
+	}
+
+	// 确保至少有牌可打
+	if len(indices) == 0 && len(ai.player.Hand) > 0 {
+		indices = append(indices, 0)
+	}
+
+	return indices
+}
+
+// 决定是否质疑
+func (ai *aiStrategy) shouldChallenge() bool {
+	if ai.state.LastPlay == nil {
+		return false
+	}
+
+	// Bristle 角色检查
+	maxChallenges := 1
+	if ai.player.CharacterID == game.CharacterBristle {
+		maxChallenges = 2
+	}
+	if ai.player.ChallengeUsed >= maxChallenges {
+		return false
+	}
+
+	// 统计自己手里的目标牌（包括WILD）
+	myTargetCount := 0
+	for _, c := range ai.player.Hand {
+		if c == ai.state.TargetCard || c == game.Wild {
+			myTargetCount++
+		}
+	}
+
+	claimedCount := len(ai.state.LastPlay.CardIDs)
+	targetPlayer := ai.state.GetPreviousPlayer()
+
+	// 计算质疑基础概率
+	baseProbability := 0.0
+
+	// 因素1：对方出牌数量 vs 自己手牌数量
+	if claimedCount >= 3 {
+		if myTargetCount >= 4 {
+			baseProbability = 0.8 // 对方出3张，我有4张，80%质疑
+		} else if myTargetCount >= 3 {
+			baseProbability = 0.6 // 对方出3张，我有3张，60%质疑
+		} else if myTargetCount >= 2 {
+			baseProbability = 0.3 // 对方出3张，我有2张，30%质疑
+		}
+	} else if claimedCount >= 2 {
+		if myTargetCount >= 4 {
+			baseProbability = 0.5 // 对方出2张，我有4张，50%质疑
+		} else if myTargetCount >= 3 {
+			baseProbability = 0.3 // 对方出2张，我有3张，30%质疑
+		}
+	} else {
+		// 对方只出1张，很少质疑
+		if myTargetCount >= 5 {
+			baseProbability = 0.2
+		}
+	}
+
+	// 因素2：对方手牌数量（手牌少可能着急出牌容易说谎）
+	if targetPlayer != nil && targetPlayer.HandCount <= 2 && claimedCount >= 2 {
+		baseProbability += 0.15
+	}
+
+	// 因素3：对方历史说谎率
+	if targetPlayer != nil && targetPlayer.PlayCount > 0 {
+		lieRate := float64(targetPlayer.LieCount) / float64(targetPlayer.PlayCount)
+		if lieRate > 0.5 {
+			baseProbability += 0.1 // 对方经常说谎，增加质疑概率
+		}
+	}
+
+	// 根据策略类型调整概率
+	switch ai.strategyType {
+	case AIStrategyConservative:
+		// 保守型：更倾向于质疑
+		baseProbability *= 1.3
+	case AIStrategyAggressive:
+		// 激进型：较少质疑（更关注自己出牌）
+		baseProbability *= 0.7
+	case AIStrategyBalanced:
+		// 平衡型：保持基础概率
+		baseProbability *= 1.0
+	case AIStrategyRandom:
+		// 随机型：完全随机
+		baseProbability = rand.Float64()
+	}
+
+	// 限制概率范围
+	if baseProbability > 0.9 {
+		baseProbability = 0.9
+	}
+	if baseProbability < 0.0 {
+		baseProbability = 0.0
+	}
+
+	return rand.Float64() < baseProbability
 }
 
 func (r *GameRoom) executeAIPlay(player *game.Player) {
@@ -758,6 +1058,39 @@ func (r *GameRoom) executeAIPlay(player *game.Player) {
 		if !r.finalizeGameIfOver() {
 			r.processAITurns()
 		}
+	}
+}
+
+func (r *GameRoom) executeAIPlaySmart(player *game.Player, ai *aiStrategy) {
+	playCount := ai.decidePlayCount()
+	indices := ai.selectCards(playCount)
+
+	if len(indices) == 0 {
+		// 安全保护：如果没有选中任何牌，跳过
+		r.executePass(player.ID)
+		return
+	}
+
+	// 验证索引有效性
+	for _, idx := range indices {
+		if idx < 0 || idx >= len(player.Hand) {
+			log.Printf("AI selected invalid card index %d for player %d (hand size: %d)", idx, player.ID, len(player.Hand))
+			r.executePass(player.ID)
+			return
+		}
+	}
+
+	err := r.State.PlayCard(player.ID, indices, r.State.TargetCard)
+	if err != nil {
+		log.Printf("AI play card error for player %d: %v", player.ID, err)
+		// 如果出牌失败，尝试跳过
+		r.executePass(player.ID)
+		return
+	}
+
+	r.broadcastGameState()
+	if !r.finalizeGameIfOver() {
+		r.processAITurns()
 	}
 }
 
