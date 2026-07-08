@@ -3,7 +3,6 @@ package websocket
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"sort"
 	"sync"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"liars-bar/internal/game"
+	"liars-bar/internal/logger"
 )
 
 type GameEvent struct {
@@ -69,7 +69,10 @@ func (r *GameRoom) HandleEvent(evt GameEvent) {
 	select {
 	case r.Events <- evt:
 	default:
-		log.Printf("Room %d event channel full, dropping %s", r.ID, evt.Type)
+		logger.WithContext(map[string]interface{}{
+			"room_id":    r.ID,
+			"event_type": evt.Type,
+		}).Error("Room event channel full, dropping event")
 	}
 }
 
@@ -128,6 +131,11 @@ func (r *GameRoom) processEvent(evt GameEvent) {
 
 func (r *GameRoom) handlePlayerJoin(evt GameEvent) {
 	if r.State.Phase == game.PhasePlaying || r.State.Phase == game.PhaseGameOver {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Warn("Player tried to join game in progress")
 		r.sendError(evt.PlayerID, "game already started")
 		return
 	}
@@ -151,14 +159,28 @@ func (r *GameRoom) handlePlayerJoin(evt GameEvent) {
 	}
 
 	if player, ok := r.Players[evt.PlayerID]; ok {
+		// 玩家已在房间（匹配或重连），只更新在线状态和昵称，不覆盖角色
 		player.IsOnline = true
 		player.IsAI = false
 		player.AITakeover = false
 		player.Nickname = nickname
-		player.CharacterID = characterID
-		player.CharacterName = characterName
+		// 只有当 payload 明确提供了 character_id 时才更新角色
+		if len(evt.Payload) > 0 && payload.CharacterID != "" {
+			player.CharacterID = characterID
+			player.CharacterName = characterName
+		}
+		logger.WithContext(map[string]interface{}{
+			"room_id":        r.ID,
+			"player_id":      evt.PlayerID,
+			"character_id":   player.CharacterID,
+			"character_name": player.CharacterName,
+		}).Info("Player rejoined room")
 	} else {
 		if len(r.Players) >= 4 {
+			logger.WithContext(map[string]interface{}{
+				"room_id":   r.ID,
+				"player_id": evt.PlayerID,
+			}).Warn("Player tried to join full room")
 			r.sendError(evt.PlayerID, "room is full")
 			return
 		}
@@ -172,15 +194,24 @@ func (r *GameRoom) handlePlayerJoin(evt GameEvent) {
 			CharacterID:   characterID,
 			CharacterName: characterName,
 		}
+		logger.WithContext(map[string]interface{}{
+			"room_id":        r.ID,
+			"player_id":      evt.PlayerID,
+			"character_id":   characterID,
+			"character_name": characterName,
+			"seat_index":     r.Players[evt.PlayerID].SeatIndex,
+		}).Info("Player joined room")
 	}
 
+	// 获取玩家最终的角色信息（可能是保留的，也可能是新设置的）
+	finalPlayer := r.Players[evt.PlayerID]
 	r.broadcast(Message{
 		Type: "PLAYER_JOINED",
 		Payload: map[string]interface{}{
 			"player_id":      evt.PlayerID,
 			"nickname":       nickname,
-			"character_id":   characterID,
-			"character_name": characterName,
+			"character_id":   finalPlayer.CharacterID,
+			"character_name": finalPlayer.CharacterName,
 		},
 	})
 	r.broadcastRoomState()
@@ -188,11 +219,20 @@ func (r *GameRoom) handlePlayerJoin(evt GameEvent) {
 
 func (r *GameRoom) handleSetCharacter(evt GameEvent) {
 	if r.State.Phase != game.PhaseWaiting && r.State.Phase != game.PhaseMatched {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Warn("Player tried to change character after game started")
 		r.sendError(evt.PlayerID, "cannot change character after game started")
 		return
 	}
 	player, ok := r.Players[evt.PlayerID]
 	if !ok {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+		}).Warn("Player not found when setting character")
 		r.sendError(evt.PlayerID, "player not in room")
 		return
 	}
@@ -200,12 +240,26 @@ func (r *GameRoom) handleSetCharacter(evt GameEvent) {
 		CharacterID string `json:"character_id"`
 	}{}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"error":     err.Error(),
+		}).Warn("Invalid character payload")
 		r.sendError(evt.PlayerID, "invalid character payload")
 		return
 	}
 	player.CharacterID = game.NormalizeCharacterID(payload.CharacterID)
 	player.CharacterName = game.CharacterName(player.CharacterID)
 	player.IsReady = false
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":            r.ID,
+		"player_id":          evt.PlayerID,
+		"character_id_raw":   payload.CharacterID,
+		"character_id":       player.CharacterID,
+		"character_name":     player.CharacterName,
+	}).Info("Player changed character")
+
 	r.broadcast(Message{
 		Type: "CHARACTER_SELECTED",
 		Payload: map[string]interface{}{
@@ -291,13 +345,28 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 
 func (r *GameRoom) handlePlayerReady(evt GameEvent) {
 	if r.State.Phase != game.PhaseWaiting && r.State.Phase != game.PhaseMatched {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Debug("Player ready in wrong phase")
 		return
 	}
 	player, ok := r.Players[evt.PlayerID]
 	if !ok {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+		}).Warn("Player not found when marking ready")
 		return
 	}
 	player.IsReady = true
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":   r.ID,
+		"player_id": evt.PlayerID,
+	}).Info("Player marked ready")
+
 	r.broadcast(Message{
 		Type: "PLAYER_READY",
 		Payload: map[string]interface{}{
@@ -307,6 +376,9 @@ func (r *GameRoom) handlePlayerReady(evt GameEvent) {
 	r.broadcastRoomState()
 
 	if len(r.Players) == 4 && r.allPlayersReady() {
+		logger.WithContext(map[string]interface{}{
+			"room_id": r.ID,
+		}).Info("All players ready, starting game")
 		r.startGame()
 	}
 }
@@ -459,6 +531,11 @@ func (r *GameRoom) finalizeGameIfOver() bool {
 
 func (r *GameRoom) handlePlayCard(evt GameEvent) {
 	if r.State.Phase != game.PhasePlaying {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Warn("Player tried to play card in wrong phase")
 		return
 	}
 
@@ -467,17 +544,34 @@ func (r *GameRoom) handlePlayCard(evt GameEvent) {
 		Claim   string `json:"claim"`
 	}{}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+		}).Error("Failed to parse play card payload: %v", err)
 		return
 	}
 
 	err := r.State.PlayCard(evt.PlayerID, payload.CardIDs, game.Card(payload.Claim))
 	if err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"card_ids":  payload.CardIDs,
+			"claim":     payload.Claim,
+		}).Warn("Play card failed: %v", err)
 		r.Hub.GetClient(evt.PlayerID).SendMessage(Message{
 			Type:    "ERROR",
 			Payload: map[string]interface{}{"msg": err.Error()},
 		})
 		return
 	}
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":    r.ID,
+		"player_id":  evt.PlayerID,
+		"card_count": len(payload.CardIDs),
+		"claim":      payload.Claim,
+	}).Info("Player played cards")
 
 	r.broadcastGameState()
 	if r.finalizeGameIfOver() {
@@ -487,7 +581,12 @@ func (r *GameRoom) handlePlayCard(evt GameEvent) {
 }
 
 func (r *GameRoom) handleChallenge(evt GameEvent) {
-	if r.State.Phase != game.PhasePlaying {
+	if r.State.Phase != game.PhaseChallenge {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Warn("Player tried to challenge in wrong phase")
 		return
 	}
 
@@ -496,14 +595,32 @@ func (r *GameRoom) handleChallenge(evt GameEvent) {
 	}{}
 	json.Unmarshal(evt.Payload, &payload)
 
+	logger.WithContext(map[string]interface{}{
+		"room_id":      r.ID,
+		"challenger":   evt.PlayerID,
+		"target":       payload.TargetPlayerID,
+	}).Info("Player challenging")
+
 	result, err := r.State.Challenge(evt.PlayerID)
 	if err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":    r.ID,
+			"player_id":  evt.PlayerID,
+		}).Error("Challenge failed: %v", err)
 		r.Hub.GetClient(evt.PlayerID).SendMessage(Message{
 			Type:    "ERROR",
 			Payload: map[string]interface{}{"msg": err.Error()},
 		})
 		return
 	}
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":    r.ID,
+		"challenger": evt.PlayerID,
+		"success":    result.Success,
+		"loser_id":   result.LoserID,
+		"survived":   result.Punishment != nil && result.Punishment.Survived,
+	}).Info("Challenge result")
 
 	r.broadcast(Message{
 		Type:    "CHALLENGE_RESULT",
@@ -525,6 +642,10 @@ func (r *GameRoom) handleChallenge(evt GameEvent) {
 		})
 
 		if !loser.IsAlive {
+			logger.WithContext(map[string]interface{}{
+				"room_id":   r.ID,
+				"player_id": loser.ID,
+			}).Info("Player eliminated")
 			r.broadcast(Message{
 				Type: "PLAYER_ELIMINATED",
 				Payload: map[string]interface{}{
@@ -538,12 +659,62 @@ func (r *GameRoom) handleChallenge(evt GameEvent) {
 		return
 	}
 
+	// Challenge() 已经处理了惩罚并将状态转换到 PhasePlaying
+	// 不需要调用 SkipChallenge()，直接广播状态并继续游戏
 	r.broadcastGameState()
 	r.processAITurns()
 }
 
 func (r *GameRoom) handlePass(evt GameEvent) {
+	if r.State.Phase == game.PhaseChallenge {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"phase":     r.State.Phase,
+		}).Debug("Player passing challenge")
+
+		allPassed, err := r.State.PassChallenge(evt.PlayerID)
+		if err != nil {
+			logger.WithContext(map[string]interface{}{
+				"room_id":   r.ID,
+				"player_id": evt.PlayerID,
+				"error":     err.Error(),
+			}).Warn("Pass challenge failed")
+			r.Hub.GetClient(evt.PlayerID).SendMessage(Message{
+				Type:    "ERROR",
+				Payload: map[string]interface{}{"msg": err.Error()},
+			})
+			return
+		}
+
+		if allPassed {
+			logger.WithContext(map[string]interface{}{
+				"room_id": r.ID,
+			}).Info("All players passed challenge, skipping to next player")
+			if err := r.State.SkipChallenge(); err != nil {
+				return
+			}
+		}
+
+		r.broadcastGameState()
+		if allPassed {
+			r.processAITurns()
+		}
+		return
+	}
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":   r.ID,
+		"player_id": evt.PlayerID,
+		"phase":     r.State.Phase,
+	}).Debug("Player passing turn")
+
 	if err := r.State.Pass(evt.PlayerID); err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"error":     err.Error(),
+		}).Warn("Pass turn failed")
 		r.Hub.GetClient(evt.PlayerID).SendMessage(Message{
 			Type:    "ERROR",
 			Payload: map[string]interface{}{"msg": err.Error()},
@@ -587,14 +758,33 @@ func (r *GameRoom) handleUseSkill(evt GameEvent) {
 		TargetPlayerID uint `json:"target_player_id"`
 	}{}
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"error":     err.Error(),
+		}).Warn("Invalid skill payload")
 		r.sendError(evt.PlayerID, "invalid skill payload")
 		return
 	}
 	hand, err := r.State.UseFoxyPeek(evt.PlayerID, payload.TargetPlayerID)
 	if err != nil {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+			"target_id": payload.TargetPlayerID,
+			"error":     err.Error(),
+		}).Warn("Skill use failed")
 		r.sendError(evt.PlayerID, err.Error())
 		return
 	}
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":   r.ID,
+		"player_id": evt.PlayerID,
+		"target_id": payload.TargetPlayerID,
+		"skill":     "foxy_peek",
+	}).Info("Player used skill")
+
 	if client := r.Hub.GetClient(evt.PlayerID); client != nil {
 		client.SendMessage(Message{
 			Type: "SKILL_RESULT",
@@ -626,6 +816,12 @@ func (r *GameRoom) handleReconnect(evt GameEvent) {
 		player.IsOnline = true
 		player.IsAI = false
 		player.AITakeover = false
+
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": evt.PlayerID,
+		}).Info("Player reconnected")
+
 		if client := r.Hub.GetClient(evt.PlayerID); client != nil {
 			client.SendMessage(Message{
 				Type:    "GAME_STATE",
@@ -663,26 +859,169 @@ func (r *GameRoom) broadcastGameState() {
 }
 
 func (r *GameRoom) processAITurns() {
+	if r.State.Phase == game.PhaseChallenge {
+		r.processAIChallengePhase()
+		return
+	}
+
 	if r.State.Phase != game.PhasePlaying {
 		return
 	}
 
 	currentPlayer := r.State.GetCurrentPlayer()
-	if currentPlayer == nil || !currentPlayer.IsAI {
+	if currentPlayer == nil {
 		return
 	}
 
+	// 如果当前玩家没有手牌，自动跳过（包括真人玩家和AI）
+	if len(currentPlayer.Hand) == 0 {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": currentPlayer.ID,
+			"phase":     r.State.Phase,
+		}).Debug("Player has no cards, auto-skipping")
+		r.State.NextPlayer()
+		r.broadcastGameState()
+		r.processAITurns()
+		return
+	}
+
+	// 如果是AI玩家，继续AI逻辑
+	if !currentPlayer.IsAI {
+		return
+	}
+
+	// 延迟执行AI回合，避免race condition
 	go func() {
-		time.Sleep(1 * time.Second) // simulate thinking
+		time.Sleep(1 * time.Second)
 		r.mu.Lock()
 		defer r.mu.Unlock()
+
+		// 再次检查当前玩家状态，防止延迟期间状态变化
+		cp := r.State.GetCurrentPlayer()
+		if cp == nil || !cp.IsAI || len(cp.Hand) == 0 {
+			return
+		}
+
 		r.executeAITurn()
 	}()
+}
+
+func (r *GameRoom) processAIChallengePhase() {
+	if r.State.Phase != game.PhaseChallenge {
+		return
+	}
+
+	// 安全检查：如果没有 LastPlay，不应该在 challenge 阶段
+	if r.State.LastPlay == nil {
+		r.State.Phase = game.PhasePlaying
+		r.broadcastGameState()
+		r.processAITurns()
+		return
+	}
+
+	// 收集所有需要决策的AI玩家
+	aiPlayers := make([]*game.Player, 0)
+	for _, player := range r.State.Players {
+		if !player.IsAI || !player.IsAlive {
+			continue
+		}
+		if player.ID == r.State.LastPlay.PlayerID {
+			continue
+		}
+		if r.State.ChallengePassed[player.ID] {
+			continue
+		}
+		aiPlayers = append(aiPlayers, player)
+	}
+
+	// 如果没有AI需要决策，检查是否所有人都已pass
+	if len(aiPlayers) == 0 {
+		// 计算是否所有合格玩家都已pass
+		eligibleCount := 0
+		passedCount := 0
+		for _, p := range r.State.Players {
+			if p.IsAlive && p.ID != r.State.LastPlay.PlayerID {
+				eligibleCount++
+				if r.State.ChallengePassed[p.ID] {
+					passedCount++
+				}
+			}
+		}
+		if eligibleCount > 0 && passedCount >= eligibleCount {
+			r.State.SkipChallenge()
+			r.broadcastGameState()
+			r.processAITurns()
+		}
+		return
+	}
+
+	// 让第一个AI做决策
+	player := aiPlayers[0]
+	go func(p *game.Player) {
+		time.Sleep(time.Duration(500+rand.Intn(1000)) * time.Millisecond)
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		if r.State.Phase != game.PhaseChallenge {
+			return
+		}
+
+		// 再次检查玩家是否还活着
+		if !p.IsAlive {
+			// 玩家已死亡，继续处理下一个AI
+			r.processAIChallengePhase()
+			return
+		}
+
+		// 检查LastPlay是否还存在
+		if r.State.LastPlay == nil {
+			return
+		}
+
+		actions := r.State.GetLegalActions(p.ID)
+		hasChallenge := false
+		for _, a := range actions {
+			if a == "CHALLENGE" {
+				hasChallenge = true
+				break
+			}
+		}
+
+		ai := newAIStrategy(p, r.State)
+		if hasChallenge && ai.shouldChallenge() {
+			r.executeChallenge(p.ID, r.State.LastPlay.PlayerID)
+		} else {
+			allPassed, err := r.State.PassChallenge(p.ID)
+			if err == nil {
+				if allPassed {
+					// 所有人都pass，跳过质疑阶段
+					r.State.SkipChallenge()
+					r.broadcastGameState()
+					r.processAITurns()
+				} else {
+					// 还有其他AI需要决策，不广播，继续处理下一个AI
+					r.processAIChallengePhase()
+				}
+			} else {
+				// PassChallenge失败，可能是因为状态已改变，重新处理
+				r.processAIChallengePhase()
+			}
+		}
+	}(player)
 }
 
 func (r *GameRoom) executeAITurn() {
 	currentPlayer := r.State.GetCurrentPlayer()
 	if currentPlayer == nil || !currentPlayer.IsAI {
+		return
+	}
+
+	// 如果AI玩家没有手牌，自动跳过
+	if len(currentPlayer.Hand) == 0 {
+		r.State.NextPlayer()
+		r.broadcastGameState()
+		r.processAITurns()
 		return
 	}
 
@@ -824,6 +1163,11 @@ func (ai *aiStrategy) shouldSkipTurn() bool {
 func (ai *aiStrategy) decidePlayCount() int {
 	handSize := len(ai.player.Hand)
 
+	// 防护：如果手牌为0，返回1（调用方会处理）
+	if handSize == 0 {
+		return 1
+	}
+
 	switch ai.strategyType {
 	case AIStrategyConservative:
 		// 保守型：少打点，降低风险
@@ -861,6 +1205,9 @@ func (ai *aiStrategy) decidePlayCount() int {
 		if handSize < maxPlay {
 			maxPlay = handSize
 		}
+		if maxPlay < 1 {
+			return 1
+		}
 		return rand.Intn(maxPlay) + 1
 	}
 
@@ -883,33 +1230,38 @@ func (ai *aiStrategy) selectCards(playCount int) []int {
 			indices = append(indices, wildCards[0])
 			wildCards = wildCards[1:]
 		}
-		// 如果必须说谎，只在手牌多时才说
-		if len(indices) < playCount && len(ai.player.Hand) >= 4 {
-			for len(indices) < playCount && len(otherCards) > 0 {
-				indices = append(indices, otherCards[0])
-				otherCards = otherCards[1:]
-			}
+		// 如果必须说谎，优先在手牌多时说谎，但手牌少时也会说谎以避免返回空数组
+		for len(indices) < playCount && len(otherCards) > 0 {
+			indices = append(indices, otherCards[0])
+			otherCards = otherCards[1:]
 		}
 
 	case AIStrategyAggressive:
 		// 激进型：混合打牌，经常说谎
 		// 50%概率混入假牌
-		usedSlots := 0
-		for usedSlots < playCount {
+		for len(indices) < playCount {
+			cardAdded := false
 			if rand.Float64() < 0.5 && len(targetCards) > 0 {
 				indices = append(indices, targetCards[0])
 				targetCards = targetCards[1:]
+				cardAdded = true
 			} else if len(otherCards) > 0 {
 				indices = append(indices, otherCards[0])
 				otherCards = otherCards[1:]
+				cardAdded = true
 			} else if len(targetCards) > 0 {
 				indices = append(indices, targetCards[0])
 				targetCards = targetCards[1:]
+				cardAdded = true
 			} else if len(wildCards) > 0 {
 				indices = append(indices, wildCards[0])
 				wildCards = wildCards[1:]
+				cardAdded = true
 			}
-			usedSlots++
+			// 如果没有可用卡牌，退出循环
+			if !cardAdded {
+				break
+			}
 		}
 
 	case AIStrategyBalanced:
@@ -1062,7 +1414,28 @@ func (r *GameRoom) executeAIPlay(player *game.Player) {
 }
 
 func (r *GameRoom) executeAIPlaySmart(player *game.Player, ai *aiStrategy) {
+	// 首先检查手牌是否为空
+	if len(player.Hand) == 0 {
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": player.ID,
+		}).Warn("AI has no cards, skipping turn")
+		r.executePass(player.ID)
+		return
+	}
+
 	playCount := ai.decidePlayCount()
+
+	// 确保playCount不超过手牌数量
+	if playCount > len(player.Hand) {
+		playCount = len(player.Hand)
+	}
+
+	// 确保至少打1张牌
+	if playCount < 1 {
+		playCount = 1
+	}
+
 	indices := ai.selectCards(playCount)
 
 	if len(indices) == 0 {
@@ -1074,7 +1447,12 @@ func (r *GameRoom) executeAIPlaySmart(player *game.Player, ai *aiStrategy) {
 	// 验证索引有效性
 	for _, idx := range indices {
 		if idx < 0 || idx >= len(player.Hand) {
-			log.Printf("AI selected invalid card index %d for player %d (hand size: %d)", idx, player.ID, len(player.Hand))
+			logger.WithContext(map[string]interface{}{
+				"room_id":   r.ID,
+				"player_id": player.ID,
+				"index":     idx,
+				"hand_size": len(player.Hand),
+			}).Error("AI selected invalid card index")
 			r.executePass(player.ID)
 			return
 		}
@@ -1082,7 +1460,11 @@ func (r *GameRoom) executeAIPlaySmart(player *game.Player, ai *aiStrategy) {
 
 	err := r.State.PlayCard(player.ID, indices, r.State.TargetCard)
 	if err != nil {
-		log.Printf("AI play card error for player %d: %v", player.ID, err)
+		logger.WithContext(map[string]interface{}{
+			"room_id":   r.ID,
+			"player_id": player.ID,
+			"error":     err.Error(),
+		}).Error("AI play card failed")
 		// 如果出牌失败，尝试跳过
 		r.executePass(player.ID)
 		return
