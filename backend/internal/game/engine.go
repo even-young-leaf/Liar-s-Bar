@@ -200,12 +200,13 @@ func (gs *GameState) NextPlayer() {
 	start := (gs.CurrentPlayer + 1) % len(gs.Players)
 	for i := 0; i < len(gs.Players); i++ {
 		idx := (start + i) % len(gs.Players)
-		if gs.Players[idx].IsAlive {
+		if gs.Players[idx].IsAlive && len(gs.Players[idx].Hand) > 0 {
 			gs.CurrentPlayer = idx
 			gs.CurrentTurn++
 			return
 		}
 	}
+	// 如果所有存活玩家都没有手牌，保持当前玩家不变
 }
 
 func (gs *GameState) GetPreviousPlayer() *Player {
