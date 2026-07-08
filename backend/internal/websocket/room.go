@@ -1055,7 +1055,8 @@ func (r *GameRoom) simpleAITurn(player *game.Player, actions []string) {
 	if hasChallenge && r.State.LastPlay != nil && ai.shouldChallenge() {
 		r.executeChallenge(player.ID, r.State.LastPlay.PlayerID)
 	} else if hasPlay {
-		if ai.shouldSkipTurn() {
+		// 游戏规则：只要有牌就必须出牌，没牌才能Pass
+		if len(player.Hand) == 0 {
 			r.executePass(player.ID)
 		} else {
 			r.executeAIPlaySmart(player, ai)
@@ -1128,35 +1129,6 @@ func (ai *aiStrategy) calculateLyingRisk(targetCards, wildCards []int) float64 {
 	riskMultiplier := 1.0 + float64(4-alivePlayers)*0.2
 
 	return baseRisk * riskMultiplier
-}
-
-// 决定是否跳过
-func (ai *aiStrategy) shouldSkipTurn() bool {
-	targetCards, wildCards, _ := ai.analyzeHand()
-	truthfulCards := len(targetCards) + len(wildCards)
-
-	switch ai.strategyType {
-	case AIStrategyConservative:
-		// 保守型：手里没真牌时30%概率跳过
-		if truthfulCards == 0 && rand.Float64() < 0.3 {
-			return true
-		}
-	case AIStrategyAggressive:
-		// 激进型：几乎不跳过
-		return false
-	case AIStrategyBalanced:
-		// 平衡型：手里没真牌且手牌少时15%跳过
-		if truthfulCards == 0 && len(ai.player.Hand) <= 2 && rand.Float64() < 0.15 {
-			return true
-		}
-	case AIStrategyRandom:
-		// 随机型：10%概率随机跳过
-		if rand.Float64() < 0.1 {
-			return true
-		}
-	}
-
-	return false
 }
 
 // 决定打几张牌
