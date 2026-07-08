@@ -106,19 +106,20 @@ func CharacterName(id string) string {
 }
 
 type GameState struct {
-	Phase         GamePhase     `json:"phase"`
-	CurrentPlayer int           `json:"current_player"`
-	CurrentRound  int           `json:"current_round"`
-	CurrentTurn   int           `json:"current_turn"`
-	TargetCard    Card          `json:"target_card"`
-	Players       []*Player     `json:"players"`
-	LastPlay      *RoundRecord  `json:"last_play"`
-	RoundHistory  []RoundRecord `json:"-"`
-	Deck          []Card        `json:"-"`
-	DiscardPile   []Card        `json:"-"`
-	RoundCounter  int           `json:"-"`
-	WinnerID      *uint         `json:"winner_id"`
-	AliveCount    int           `json:"alive_count"`
+	Phase            GamePhase     `json:"phase"`
+	CurrentPlayer    int           `json:"current_player"`
+	CurrentRound     int           `json:"current_round"`
+	CurrentTurn      int           `json:"current_turn"`
+	TargetCard       Card          `json:"target_card"`
+	Players          []*Player     `json:"players"`
+	LastPlay         *RoundRecord  `json:"last_play"`
+	RoundHistory     []RoundRecord `json:"-"`
+	Deck             []Card        `json:"-"`
+	DiscardPile      []Card        `json:"-"`
+	RoundCounter     int           `json:"-"`
+	WinnerID         *uint         `json:"winner_id"`
+	AliveCount       int           `json:"alive_count"`
+	ChallengePassed  map[uint]bool `json:"-"`
 }
 
 func NewDeck() []Card {
@@ -290,8 +291,8 @@ func (gs *GameState) PlayCard(playerID uint, cardIndices []int, claim Card) erro
 		Cards:    selected,
 	}
 
-	gs.NextPlayer()
-	gs.checkEmptyHands()
+	gs.Phase = PhaseChallenge
+	gs.ChallengePassed = make(map[uint]bool)
 	gs.RecordAction(playerID, ActPlayCard, map[string]interface{}{
 		"count":    len(selected),
 		"claim":    claim,
@@ -305,9 +306,8 @@ func (gs *GameState) Challenge(challengerID uint) (*ChallengeResult, error) {
 	if challenger == nil || !challenger.IsAlive {
 		return nil, fmt.Errorf("invalid challenger")
 	}
-	currentPlayer := gs.GetCurrentPlayer()
-	if currentPlayer == nil || currentPlayer.ID != challengerID {
-		return nil, fmt.Errorf("not your turn")
+	if gs.Phase != PhaseChallenge {
+		return nil, fmt.Errorf("not in challenge phase")
 	}
 	if gs.LastPlay == nil {
 		return nil, fmt.Errorf("no cards to challenge")
@@ -360,6 +360,49 @@ func (gs *GameState) Challenge(challengerID uint) (*ChallengeResult, error) {
 	return result, nil
 }
 
+func (gs *GameState) SkipChallenge() error {
+	if gs.Phase != PhaseChallenge {
+		return fmt.Errorf("not in challenge phase")
+	}
+	gs.Phase = PhasePlaying
+	gs.NextPlayer()
+	gs.checkEmptyHands()
+	return nil
+}
+
+func (gs *GameState) PassChallenge(playerID uint) (bool, error) {
+	if gs.Phase != PhaseChallenge {
+		return false, fmt.Errorf("not in challenge phase")
+	}
+	// 安全检查：如果没有 LastPlay，不应该调用 PassChallenge
+	if gs.LastPlay == nil {
+		return false, fmt.Errorf("no play to challenge")
+	}
+	player := gs.GetPlayer(playerID)
+	if player == nil || !player.IsAlive {
+		return false, fmt.Errorf("invalid player")
+	}
+	if gs.LastPlay.PlayerID == playerID {
+		return false, fmt.Errorf("cannot pass challenge on your own play")
+	}
+
+	gs.ChallengePassed[playerID] = true
+
+	eligiblePlayers := 0
+	passedPlayers := 0
+	for _, p := range gs.Players {
+		if p.IsAlive && p.ID != gs.LastPlay.PlayerID {
+			eligiblePlayers++
+			if gs.ChallengePassed[p.ID] {
+				passedPlayers++
+			}
+		}
+	}
+
+	allPassed := eligiblePlayers > 0 && passedPlayers >= eligiblePlayers
+	return allPassed, nil
+}
+
 type ChallengeResult struct {
 	Success         bool              `json:"success"`
 	Truthful        bool              `json:"truthful"`
@@ -377,6 +420,10 @@ func (gs *GameState) Pass(playerID uint) error {
 	}
 	if gs.Phase != PhasePlaying {
 		return fmt.Errorf("invalid phase")
+	}
+	player := gs.GetPlayer(playerID)
+	if player != nil && len(player.Hand) > 0 {
+		return fmt.Errorf("cannot pass when you have cards")
 	}
 	gs.NextPlayer()
 	return nil
@@ -582,22 +629,44 @@ func (gs *GameState) ToPublic(playerID uint) map[string]interface{} {
 		result["winner_id"] = *gs.WinnerID
 	}
 
+	// 添加当前玩家的合法操作
+	legalActions := gs.GetLegalActions(playerID)
+	if legalActions != nil {
+		result["legal_actions"] = legalActions
+	}
+
 	return result
 }
 
 func (gs *GameState) GetLegalActions(playerID uint) []string {
 	player := gs.GetPlayer(playerID)
-	if player == nil || !player.IsAlive || gs.Phase != PhasePlaying {
+	if player == nil || !player.IsAlive {
 		return nil
 	}
 
 	actions := make([]string, 0)
-	if gs.GetCurrentPlayer().ID == playerID {
-		actions = append(actions, "PLAY_CARD")
+
+	if gs.Phase == PhasePlaying {
+		if gs.GetCurrentPlayer().ID == playerID {
+			if len(player.Hand) > 0 {
+				actions = append(actions, "PLAY_CARD")
+			} else {
+				// 0张牌自动跳过，不给任何操作选项
+				return []string{}
+			}
+		}
 	}
 
-	if gs.LastPlay != nil && gs.LastPlay.PlayerID != playerID {
-		actions = append(actions, "CHALLENGE")
+	if gs.Phase == PhaseChallenge {
+		if gs.LastPlay != nil && gs.LastPlay.PlayerID != playerID {
+			limit := 1
+			if NormalizeCharacterID(player.CharacterID) == CharacterBristle {
+				limit = 2
+			}
+			if player.ChallengeUsed < limit {
+				actions = append(actions, "CHALLENGE")
+			}
+		}
 	}
 
 	actions = append(actions, "PASS", "CHAT")

@@ -84,7 +84,7 @@ func Load() *Config {
 			MaxPlayers:      4,
 			MatchTimeout:    10 * time.Second,
 			AIJoinTimeout:    10 * time.Second,
-			AIFillTimeout:    15 * time.Second,
+			AIFillTimeout:    1 * time.Second,
 			ReconnectTimeout: 30 * time.Second,
 			MaxCardsPlay:    3,
 		},

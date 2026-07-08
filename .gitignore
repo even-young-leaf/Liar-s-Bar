@@ -18,6 +18,8 @@ backend/server
 Thumbs.db
 
 # Go
+backend/bin/
+backend/vendor/
 
 # Python
 ai-service/__pycache__/

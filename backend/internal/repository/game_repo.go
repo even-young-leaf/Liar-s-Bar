@@ -67,7 +67,7 @@ func (r *GameRepo) CreateGamePlayer(gp *model.GamePlayer) error {
 	return database.DB.Create(gp).Error
 }
 
-func (r *GameRepo) GetGamePlayers(gameID uint) ([]model.GamePlayer, error) {
+func (r *GameRepo) GetGamePlayersBasic(gameID uint) ([]model.GamePlayer, error) {
 	var players []model.GamePlayer
 	err := database.DB.Where("game_id = ?", gameID).Find(&players).Error
 	return players, err

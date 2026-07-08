@@ -386,7 +386,14 @@ function onError(payload) {
 
 function onChallengeResult(payload) {
   const verb = payload.success ? '成功！' : '失败...'
-  addSystemMsg(`质疑${verb} 撒谎者是玩家ID ${payload.liar_id}`)
+  const cards = payload.challenged_cards || []
+  const cardStr = cards.length > 0 ? ` 实际打出的牌: ${cards.join(', ')}` : ''
+
+  if (payload.success) {
+    addSystemMsg(`质疑${verb} 玩家 ${payload.liar_id} 说谎了！${cardStr}`)
+  } else {
+    addSystemMsg(`质疑${verb} 玩家 ${payload.liar_id} 说的是真话。${cardStr}`)
+  }
   triggerChallengeFx(payload.success)
 }
 

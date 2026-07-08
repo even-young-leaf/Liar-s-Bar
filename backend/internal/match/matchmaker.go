@@ -1,12 +1,12 @@
 package match
 
 import (
-	"log"
 	"sync"
 	"time"
 
 	"liars-bar/internal/config"
 	"liars-bar/internal/game"
+	"liars-bar/internal/logger"
 	"liars-bar/internal/model"
 	"liars-bar/internal/service"
 	"liars-bar/internal/websocket"
@@ -58,7 +58,13 @@ func (ms *MatchService) JoinQueue(userID uint, nickname string, characterID stri
 		CharacterID: game.NormalizeCharacterID(characterID),
 		JoinedAt:    time.Now(),
 	})
-	log.Printf("Player %d joined match queue", userID)
+
+	logger.WithContext(map[string]interface{}{
+		"user_id":      userID,
+		"nickname":     nickname,
+		"character_id": game.NormalizeCharacterID(characterID),
+	}).Info("Player joined match queue")
+
 	return nil
 }
 
@@ -174,12 +180,18 @@ func (ms *MatchService) createRoom(players []MatchEntry, fillAI bool) {
 	// len(hub.Rooms)+1 scheme collided once rooms were destroyed).
 	room, err := ms.roomService.CreateRoom(players[0].UserID, "Match Room")
 	if err != nil {
-		log.Printf("Failed to create DB room for match: %v", err)
+		logger.WithContext(map[string]interface{}{
+			"error": err.Error(),
+		}).Error("Failed to create DB room for match")
 		return
 	}
 	for _, entry := range players[1:] {
 		if err := ms.roomService.JoinRoom(room.ID, entry.UserID); err != nil {
-			log.Printf("Failed to add player %d to match room %d: %v", entry.UserID, room.ID, err)
+			logger.WithContext(map[string]interface{}{
+				"room_id":   room.ID,
+				"user_id":   entry.UserID,
+				"error":     err.Error(),
+			}).Error("Failed to add player to match room")
 		}
 	}
 	ms.roomService.UpdateStatus(room.ID, model.RoomStatusMatched)
@@ -204,6 +216,13 @@ func (ms *MatchService) createRoom(players []MatchEntry, fillAI bool) {
 			CharacterID:   characterID,
 			CharacterName: game.CharacterName(characterID),
 		}
+
+		logger.WithContext(map[string]interface{}{
+			"user_id":      entry.UserID,
+			"seat_index":   i,
+			"character_id": characterID,
+		}).Info("Added human player to match room")
+
 		if client := ms.Hub.GetClient(entry.UserID); client != nil {
 			client.RoomID = gameRoom.ID
 			client.SendMessage(websocket.Message{
@@ -233,10 +252,23 @@ func (ms *MatchService) createRoom(players []MatchEntry, fillAI bool) {
 			CharacterID:   game.CharacterScubby,
 			CharacterName: game.CharacterName(game.CharacterScubby),
 		}
+
+		logger.WithContext(map[string]interface{}{
+			"ai_id":        aiID,
+			"seat_index":   len(players) + i,
+			"character_id": game.CharacterScubby,
+		}).Debug("Added AI player to match room")
 	}
 
 	ms.Hub.RegisterRoom(gameRoom)
 	gameRoom.State.Phase = game.PhaseMatched
+
+	logger.WithContext(map[string]interface{}{
+		"room_id":      gameRoom.ID,
+		"human_count":  len(players),
+		"ai_count":     aiCount,
+		"total_players": len(gameRoom.Players),
+	}).Info("Match room created, starting game in 2 seconds")
 
 	// Start game after a short delay
 	go func() {
@@ -244,6 +276,4 @@ func (ms *MatchService) createRoom(players []MatchEntry, fillAI bool) {
 		gameRoom.HandleEvent(websocket.GameEvent{Type: "START_GAME"})
 		ms.roomService.UpdateStatus(room.ID, model.RoomStatusPlaying)
 	}()
-
-	log.Printf("Room %d created with %d humans and %d AI", gameRoom.ID, len(players), aiCount)
 }

@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"liars-bar/internal/game"
+	"liars-bar/internal/logger"
 	"liars-bar/internal/match"
 	"liars-bar/internal/websocket"
 
@@ -30,6 +31,14 @@ func (c *MatchController) StartMatch(ctx *gin.Context) {
 	}
 	_ = ctx.ShouldBindJSON(&req)
 	characterID := game.NormalizeCharacterID(req.CharacterID)
+
+	log := logger.WithContext(map[string]interface{}{
+		"user_id":  userID,
+		"nickname": nickname,
+	})
+	log.Info("Player joining match queue, character_id_raw=%s, character_id_normalized=%s",
+		req.CharacterID, characterID)
+
 	c.matchService.JoinQueue(userID, nickname, characterID)
 	ctx.JSON(http.StatusOK, gin.H{
 		"code":           0,
