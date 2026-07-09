@@ -143,6 +143,11 @@ type Hub struct {
 	// OnGameOver is invoked exactly once per game when it ends, so that the
 	// caller can persist stats / records. Set by main.go.
 	OnGameOver func(roomID uint, winnerID uint, players []*game.Player)
+
+	// RoomService is used for database cleanup
+	RoomService interface {
+		CleanupStaleRooms(maxAgeMinutes int) (int, error)
+	}
 }
 
 func NewHub() *Hub {
@@ -344,4 +349,67 @@ func (h *Hub) ActiveRooms() []map[string]interface{} {
 		})
 	}
 	return rooms
+}
+
+// CleanupStaleRooms removes rooms that have existed for more than the specified duration
+func (h *Hub) CleanupStaleRooms(maxAge time.Duration) {
+	h.mu.Lock()
+	now := time.Now()
+	staleRooms := make([]uint, 0)
+
+	log.Printf("Cleanup: Checking %d rooms in memory (maxAge: %v)", len(h.Rooms), maxAge)
+
+	for roomID, room := range h.Rooms {
+		age := now.Sub(room.CreatedAt)
+		if age > maxAge {
+			staleRooms = append(staleRooms, roomID)
+			log.Printf("Cleanup: Room %d is stale (age: %v > maxAge: %v)", roomID, age, maxAge)
+		}
+	}
+
+	for _, roomID := range staleRooms {
+		room := h.Rooms[roomID]
+		delete(h.Rooms, roomID)
+
+		log.Printf("Cleanup: Removing stale room %d from memory (age: %v)", roomID, now.Sub(room.CreatedAt))
+
+		// Trigger database cleanup via OnGameOver callback
+		if h.OnGameOver != nil {
+			h.OnGameOver(roomID, 0, room.State.Players)
+		}
+
+		// Close the room
+		go room.Close()
+	}
+	h.mu.Unlock()
+
+	if len(staleRooms) > 0 {
+		log.Printf("Cleanup: Removed %d stale rooms from memory", len(staleRooms))
+	}
+
+	// Also clean up database directly for orphaned records
+	if h.RoomService != nil {
+		maxAgeMinutes := int(maxAge.Minutes())
+		deletedCount, err := h.RoomService.CleanupStaleRooms(maxAgeMinutes)
+		if err != nil {
+			log.Printf("Cleanup: Database cleanup failed: %v", err)
+		} else if deletedCount > 0 {
+			log.Printf("Cleanup: Removed %d stale rooms from database", deletedCount)
+		} else {
+			log.Printf("Cleanup: No stale rooms found in database")
+		}
+	}
+}
+
+// StartCleanupTask starts a background goroutine that periodically cleans up stale rooms
+func (h *Hub) StartCleanupTask(interval time.Duration, maxAge time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			h.CleanupStaleRooms(maxAge)
+		}
+	}()
+	log.Printf("Room cleanup task started: checking every %v, removing rooms older than %v", interval, maxAge)
 }

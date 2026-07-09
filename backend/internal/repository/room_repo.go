@@ -68,3 +68,16 @@ func (r *RoomRepo) GetPlayers(roomID uint) ([]model.RoomPlayer, error) {
 	err := database.DB.Where("room_id = ?", roomID).Order("seat_index ASC").Find(&players).Error
 	return players, err
 }
+
+func (r *RoomRepo) DeleteStaleRooms(maxAgeMinutes int) (int, error) {
+	result := database.DB.Exec(
+		"DELETE FROM rooms WHERE created_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)",
+		maxAgeMinutes,
+	)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	// Clean up orphaned room_players (rooms table has ON DELETE CASCADE would be better)
+	database.DB.Exec("DELETE FROM room_players WHERE room_id NOT IN (SELECT id FROM rooms)")
+	return int(result.RowsAffected), nil
+}

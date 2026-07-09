@@ -14,7 +14,7 @@ const (
 	King  Card = "K"
 	Queen Card = "Q"
 	Jack  Card = "J"
-	Wild  Card = "WILD"
+	Wild  Card = "W"
 )
 
 var CardOrder = []Card{Ace, King, Queen, Jack}

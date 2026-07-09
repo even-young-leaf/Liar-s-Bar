@@ -29,7 +29,7 @@ type DatabaseConfig struct {
 }
 
 func (d DatabaseConfig) DSN() string {
-	return d.User + ":" + d.Password + "@tcp(" + d.Host + ":" + d.Port + ")/" + d.DBName + "?charset=utf8mb4&parseTime=True&loc=Local"
+	return d.User + ":" + d.Password + "@tcp(" + d.Host + ":" + d.Port + ")/" + d.DBName + "?charset=utf8mb4&parseTime=True&loc=Asia%2FShanghai"
 }
 
 type RedisConfig struct {
@@ -84,7 +84,7 @@ func Load() *Config {
 			MaxPlayers:      4,
 			MatchTimeout:    10 * time.Second,
 			AIJoinTimeout:    10 * time.Second,
-			AIFillTimeout:    1 * time.Second,
+			AIFillTimeout:    10 * time.Second,
 			ReconnectTimeout: 30 * time.Second,
 			MaxCardsPlay:    3,
 		},

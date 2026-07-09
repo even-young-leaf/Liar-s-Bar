@@ -104,3 +104,11 @@ func (s *RoomService) GetPlayers(roomID uint) ([]model.RoomPlayer, error) {
 func (s *RoomService) UpdateStatus(roomID uint, status model.RoomStatus) error {
 	return s.repo.UpdateStatus(roomID, status)
 }
+
+func (s *RoomService) DeleteRoom(roomID uint) error {
+	return s.repo.Delete(roomID)
+}
+
+func (s *RoomService) CleanupStaleRooms(maxAgeMinutes int) (int, error) {
+	return s.repo.DeleteStaleRooms(maxAgeMinutes)
+}

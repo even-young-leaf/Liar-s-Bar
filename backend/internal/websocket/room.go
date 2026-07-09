@@ -32,6 +32,7 @@ type GameRoom struct {
 	turnTimer   *time.Timer
 	turnTimeout time.Duration
 	closed      bool
+	CreatedAt   time.Time
 
 	// game recording
 	GameRecordID  uint
@@ -49,6 +50,7 @@ func NewGameRoom(id uint, name string, hub *Hub) *GameRoom {
 		Events:      make(chan GameEvent, 256),
 		Hub:         hub,
 		turnTimeout: 30 * time.Second,
+		CreatedAt:   time.Now(),
 	}
 	go room.eventLoop()
 	return room
@@ -277,16 +279,53 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 		return
 	}
 
-	if r.State.Phase == game.PhasePlaying {
-		// A player leaving mid-game ends the game immediately. The remaining
-		// alive players (if any) are declared winners — but typically this
-		// means the game is abandoned. We broadcast a game-over signal so the
-		// frontend can show "玩家退出，游戏结束" and the room is destroyed once
-		// everyone has left.
-		player.IsOnline = false
-		delete(r.Players, evt.PlayerID)
+	// Remove the player first
+	player.IsOnline = false
+	delete(r.Players, evt.PlayerID)
 
-		// Pick a winner among remaining alive players (nil if none).
+	// Check if only AI players remain after this player leaves
+	hasHuman := false
+	for _, p := range r.Players {
+		if !p.IsAI {
+			hasHuman = true
+			break
+		}
+	}
+
+	// If no human players remain, clean up the room regardless of phase
+	if !hasHuman {
+		r.State.Phase = game.PhaseGameOver
+		r.State.WinnerID = nil
+
+		r.broadcast(Message{
+			Type: "PLAYER_LEFT",
+			Payload: map[string]interface{}{
+				"player_id": evt.PlayerID,
+				"nickname":  player.Nickname,
+				"game_over": true,
+				"reason":    "所有真人玩家已离开，游戏结束",
+				"winner_id": nil,
+			},
+		})
+
+		// Record stats and trigger database cleanup
+		if atomic.CompareAndSwapInt32(&r.statsRecorded, 0, 1) {
+			if r.Hub.OnGameOver != nil {
+				r.Hub.OnGameOver(r.ID, 0, r.State.Players)
+			}
+		}
+
+		// Destroy room after delay
+		go func() {
+			time.Sleep(5 * time.Second)
+			r.Hub.DestroyRoom(r.ID)
+		}()
+		return
+	}
+
+	// If playing and a human left, end the game
+	if r.State.Phase == game.PhasePlaying {
+		// Pick a winner among remaining alive human players
 		var winnerID *uint
 		for _, p := range r.Players {
 			if p.IsAlive && !p.IsAI {
@@ -309,7 +348,7 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 			},
 		})
 
-		// Record stats once.
+		// Record stats once
 		if atomic.CompareAndSwapInt32(&r.statsRecorded, 0, 1) {
 			wid := uint(0)
 			if r.State.WinnerID != nil {
@@ -320,7 +359,7 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 			}
 		}
 
-		// Destroy room after delay to let remaining players see the result
+		// Destroy room after delay
 		go func() {
 			time.Sleep(5 * time.Second)
 			r.Hub.DestroyRoom(r.ID)
@@ -328,8 +367,7 @@ func (r *GameRoom) handlePlayerLeave(evt GameEvent) {
 		return
 	}
 
-	// Pre-game leave: just remove the player.
-	delete(r.Players, evt.PlayerID)
+	// Pre-game leave: just broadcast the leave event
 	r.broadcast(Message{
 		Type: "PLAYER_LEFT",
 		Payload: map[string]interface{}{

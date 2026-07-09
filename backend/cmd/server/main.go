@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"liars-bar/internal/config"
 	"liars-bar/internal/controller"
@@ -46,11 +47,18 @@ func main() {
 	gameService := service.NewGameService()
 	gameCtrl := controller.NewGameController(gameService)
 
+	// Wire room service to hub for database cleanup
+	hub.RoomService = roomService
+
+	// Start room cleanup task: check every 20 minutes, remove rooms older than 20 minutes
+	hub.StartCleanupTask(20*time.Minute, 20*time.Minute)
+
 	// Wire game-over stat recording (invoked exactly once per finished game)
 	hub.OnGameOver = func(roomID, winnerID uint, players []*game.Player) {
 		userSvc.RecordGameResult(winnerID, players)
-		// Best-effort: mark the DB room as finished too.
+		// Mark as finished first, then delete from database
 		roomService.UpdateStatus(roomID, model.RoomStatusFinished)
+		roomService.DeleteRoom(roomID)
 	}
 
 	// Initialize matchmaking
