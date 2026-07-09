@@ -11,6 +11,8 @@ services:
       MYSQL_DATABASE: liars_bar
       MYSQL_USER: liarsbar
       MYSQL_PASSWORD: liarsbar123
+      TZ: Asia/Shanghai
+    command: --default-time-zone='+08:00'
     ports:
       - "3307:3306"
     volumes:

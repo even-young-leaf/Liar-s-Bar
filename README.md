@@ -2,6 +2,8 @@
 
 基于 Go + WebSocket 的多人在线卡牌游戏服务端，支持实时对战、AI玩家、匹配系统等功能。
 
+客户端地址：https://github.com/lhr252624/shijian3
+
 ## 技术栈
 
 - **语言**: Go 1.21
